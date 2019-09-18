@@ -11,6 +11,13 @@ import time
 import urllib
 from threading import Thread
 
+from douyin.config import hot_energy_url
+from douyin.config import hot_search_url
+from douyin.config import hot_video_url
+from douyin.utils import fetch
+
+import douyin
+
 import requests
 from six.moves import queue as Queue
 
@@ -47,7 +54,7 @@ def download(medium_type, uri, medium_url, target_folder):
 
     file_path = os.path.join(target_folder, file_name)
     if os.path.isfile(file_path):
-        print(file_name + " 已经爬取过了，文件保存在 " + file_path + " 放弃爬取")
+        print(file_name + " is exist at: " + file_path + " so REJECT")
         return
 
     print("Downloading %s from %s.\n" % (file_name, medium_url))
@@ -93,6 +100,13 @@ def get_dytk(url):
     return None
 
 
+def get_hot_video():
+    result = fetch(map_hot_func.get(hot_opt))
+    # process json data
+    video_list = result.get('aweme_list', [])
+    return video_list
+
+
 class DownloadWorker(Thread):
     def __init__(self, queue):
         Thread.__init__(self)
@@ -111,8 +125,15 @@ class CrawlerScheduler(object):
         self.numbers = []
         self.challenges = []
         self.musics = []
+        self.videos = []
+        self.hots = []
+        self.url_key = ''
         for i in range(len(items)):
+            if isinstance(items[i], dict):
+                self.hots = items
+                break
             url = get_real_address(items[i])
+            self.url_key = items[i].rstrip().lstrip().split('/')[-2]
             if not url:
                 continue
             if re.search('share/user', url):
@@ -121,6 +142,8 @@ class CrawlerScheduler(object):
                 self.challenges.append(url)
             if re.search('share/music', url):
                 self.musics.append(url)
+            if re.search('share/video', url):
+                self.videos.append(url)
 
         self.queue = Queue.Queue()
         self.scheduling()
@@ -149,6 +172,37 @@ class CrawlerScheduler(object):
             self.download_challenge_videos(url)
         for url in self.musics:
             self.download_music_videos(url)
+        for url in self.videos:
+            self.download_video(url)
+        for aweme in self.hots:
+            self.download_hot_video(aweme)
+            self.queue.join()
+            print("\nFinish Downloading All the hot video")
+
+    def download_hot_video(self, aweme):
+        current_folder = os.getcwd()
+        target_folder = os.path.join(current_folder, 'download/%s' % map_opts.get(hot_opt))
+        if not os.path.isdir(target_folder):
+            os.mkdir(target_folder)
+
+        # for aweme in aweme_list:
+        # video_count += 1
+        hostname = urllib.parse.urlparse(aweme['aweme_info']['share_url']).hostname
+        aweme['aweme_info']['hostname'] = hostname
+        self._join_download_queue(aweme['aweme_info'], target_folder)
+
+
+    def download_video(self, url):
+        video = re.findall(r'share/video/(\d+)', url)
+        if not len(video):
+            return
+
+        video_id = video[0]
+        video_count = self._download_video_media(video_id, url)
+        self.queue.join()
+        print("\nAweme number %s, video number %s\n\n" %
+              (video_id, str(video_count)))
+        print("\nFinish Downloading All the videos from %s\n\n" % video_id)
 
     def download_user_videos(self, url):
         number = re.findall(r'share/user/(\d+)', url)
@@ -241,9 +295,7 @@ class CrawlerScheduler(object):
                 share_info = aweme.get('share_info', {})
                 url = download_url.format(
                     '&'.join([key + '=' + download_params[key] for key in download_params]))
-                self.queue.put(('video',
-                                uri + "-" + share_info.get('share_desc', uri),
-                                url, target_folder))
+                self.queue.put(('video', uri, url, target_folder))
             else:
                 if aweme.get('image_infos', None):
                     image = aweme['image_infos']['label_large']
@@ -286,10 +338,32 @@ class CrawlerScheduler(object):
     #         else:
     #             break
     #     return video_count
+    def _download_video_media(self, aweme_id, url):
+        current_folder = os.getcwd()
+        target_folder = os.path.join(current_folder, 'download/videos')
+        if not os.path.isdir(target_folder):
+            os.mkdir(target_folder)
+
+        if not aweme_id:
+            print("Video %s does not exist" % aweme_id)
+            return
+        hostname = urllib.parse.urlparse(url).hostname
+        hostname = 'aweme.snssdk.com'
+        user_video_url =  "https://%s/aweme/v1/aweme/detail/" % hostname
+        user_video_params = {
+            'aweme_id': str(aweme_id)
+        }
+        # headers = {
+        #     'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_10_1) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/39.0.2171.95 Safari/537.36'
+        # }
+
+        res = requests.get('https://aweme.snssdk.com/aweme/v1/aweme/detail/?aweme_id=6737210825959869708')
+        contentJson = json.loads(res.content.decode('utf-8'))
+        a= 1
 
     def _download_user_media(self, user_id, dytk, url):
         current_folder = os.getcwd()
-        target_folder = os.path.join(current_folder, 'download/%s' % user_id)
+        target_folder = os.path.join(current_folder, 'download/{}_{}'.format(user_id, self.url_key))
         if not os.path.isdir(target_folder):
             os.mkdir(target_folder)
 
@@ -473,18 +547,34 @@ def parse_sites(fileName):
     return numbers
 
 download_favorite = False
+hot_opt = None
+map_opts = {
+    '-h': 'hot',
+    '-e': 'energy',
+    '-s': 'search',
+}
+map_hot_func = {
+    '-h': hot_video_url,
+    '-e': hot_energy_url,
+    '-s': hot_search_url,
+}
 
 if __name__ == "__main__":
     content, opts, args = None, None, []
-
     try:
         if len(sys.argv) >= 2:
-            opts, args = getopt.getopt(sys.argv[1:], "hi:o:", ["favorite"])
+            opts, args = getopt.getopt(sys.argv[1:], "he")
     except getopt.GetoptError as err:
         usage()
         sys.exit(2)
 
-    if not args:
+    if opts:
+        for o, val in opts:
+            if o in ("-h", "-e"):
+                hot_opt = o
+                content = get_hot_video()
+                break
+    elif not args:
         # check the sites file
         filename = "share-url.txt"
         if os.path.exists(filename):
