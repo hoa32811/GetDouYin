@@ -9,7 +9,9 @@ import re
 import sys
 import time
 import urllib
+import random
 from threading import Thread
+from ipaddress import ip_address
 
 from douyin.config import hot_energy_url
 from douyin.config import hot_search_url
@@ -39,9 +41,22 @@ HEADERS = {
     'user-agent': "Mozilla/5.0 (iPhone; CPU iPhone OS 11_0 like Mac OS X) AppleWebKit/604.1.38 (KHTML, like Gecko) Version/11.0 Mobile/15A372 Safari/604.1",
 }
 
+def gen_ip_address():
+    rip = ip_address('0.0.0.0')
+    while rip.is_private:
+        rip = ip_address('.'.join(map(str, (random.randint(0, 255) for _ in range(4)))))
+    return rip
+
+def gen_header():
+    headers = copy.copy(HEADERS)
+    ip = gen_ip_address()
+    headers['X-Real-IP'] = str(ip)
+    headers['X-Forwarded-For'] = str(ip)
+    return headers
+
 def download(medium_type, uri, medium_url, target_folder):
 
-    headers = copy.copy(HEADERS)
+    headers = copy.copy(gen_header())
     file_name = uri
     if medium_type == 'video':
         file_name += '.mp4'
@@ -86,12 +101,12 @@ def download(medium_type, uri, medium_url, target_folder):
 def get_real_address(url):
     if url.find('v.douyin.com') < 0:
         return url
-    res = requests.get(url, headers=HEADERS, allow_redirects=False)
+    res = requests.get(url, headers=gen_header(), allow_redirects=False)
     return res.headers['Location'] if res.status_code == 302 else None
 
 
 def get_dytk(url):
-    res = requests.get(url, headers=HEADERS)
+    res = requests.get(url, headers=gen_header())
     if not res:
         return None
     dytk = re.findall("dytk: '(.*)'", res.content.decode('utf-8'))
@@ -254,23 +269,6 @@ class CrawlerScheduler(object):
                     'vr_type': '0',
                     'test_cdn': 'None',
                     'improve_bitrate': '0',
-                    'iid': '35628056608',
-                    'device_id': '46166618999',
-                    'os_api': '18',
-                    'app_name': 'aweme',
-                    'channel': 'App%20Store',
-                    'idfa': '00000000-0000-0000-0000-000000000000',
-                    'device_platform': 'iphone',
-                    'build_number': '27014',
-                    'vid': '2ED380A7-F09C-6C9E-90F5-862D58F3129C',
-                    'openudid': '21dae85eeac1da35a69e2a0ffeaeef61c78a2e98',
-                    'device_type': 'iPhone8%2C2',
-                    'app_version': '2.7.0',
-                    'version_code': '2.7.0',
-                    'os_version': '12.0',
-                    'screen_width': '1242',
-                    'aid': '1128',
-                    'ac': 'WIFI'
                 }
                 if aweme.get('hostname') == 't.tiktok.com':
                     download_url = 'http://api.tiktokv.com/aweme/v1/play/?{0}'
@@ -389,7 +387,7 @@ class CrawlerScheduler(object):
         while True:
             if max_cursor:
                 user_video_params['max_cursor'] = str(max_cursor)
-            res = requests.get(user_video_url, headers=HEADERS,
+            res = requests.get(user_video_url, headers=gen_header(),
                                params=user_video_params)
             contentJson = json.loads(res.content.decode('utf-8'))
             aweme_list = contentJson.get('aweme_list', [])
@@ -442,7 +440,7 @@ class CrawlerScheduler(object):
                 challenge_video_params['_signature'] = self.generateSignature(
                     str(challenge_id) + '9' + str(cursor))
             res = requests.get(challenge_video_url,
-                               headers=HEADERS, params=challenge_video_params)
+                               headers=gen_header(), params=challenge_video_params)
             try:
                 contentJson = json.loads(res.content.decode('utf-8'))
             except:
@@ -498,7 +496,7 @@ class CrawlerScheduler(object):
 
             url = music_video_url.format(
                 '&'.join([key + '=' + music_video_params[key] for key in music_video_params]))
-            res = requests.get(url, headers=HEADERS)
+            res = requests.get(url, headers=gen_header())
             contentJson = json.loads(res.content.decode('utf-8'))
             aweme_list = contentJson.get('aweme_list', [])
             if not aweme_list:
