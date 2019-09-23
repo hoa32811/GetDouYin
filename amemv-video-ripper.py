@@ -10,8 +10,10 @@ import sys
 import time
 import urllib
 import random
+import shutil
 from threading import Thread
 from ipaddress import ip_address
+from datetime import datetime
 
 from douyin.config import hot_energy_url
 from douyin.config import hot_search_url
@@ -40,6 +42,15 @@ HEADERS = {
     'upgrade-insecure-requests': '1',
     'user-agent': "Mozilla/5.0 (iPhone; CPU iPhone OS 11_0 like Mac OS X) AppleWebKit/604.1.38 (KHTML, like Gecko) Version/11.0 Mobile/15A372 Safari/604.1",
 }
+HEADERS_FAVORITE = {
+    'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8',
+    'accept-encoding': 'gzip, deflate, br',
+    'accept-language': 'zh-CN,zh;q=0.9',
+    'pragma': 'no-cache',
+    'cache-control': 'no-cache',
+    'upgrade-insecure-requests': '1',
+    'user-agent': 'Mozilla/5.0 (Linux; U; Android 5.1.1; zh-cn; MI 4S Build/LMY47V) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/53.0.2785.146 Mobile Safari/537.36 XiaoMi/MiuiBrowser/9.1.3',
+}
 
 def gen_ip_address():
     rip = ip_address('0.0.0.0')
@@ -47,14 +58,37 @@ def gen_ip_address():
         rip = ip_address('.'.join(map(str, (random.randint(0, 255) for _ in range(4)))))
     return rip
 
-def gen_header():
-    headers = copy.copy(HEADERS)
+def gen_header(default = HEADERS):
+    headers = copy.copy(default)
     ip = gen_ip_address()
     headers['X-Real-IP'] = str(ip)
     headers['X-Forwarded-For'] = str(ip)
     return headers
 
-def download(medium_type, uri, medium_url, target_folder):
+def get_real_address(url):
+    if url.find('v.douyin.com') < 0:
+        return url
+    res = requests.get(url, headers=gen_header(), allow_redirects=False)
+    return res.headers['Location'] if res.status_code == 302 else None
+
+
+def get_dytk(url):
+    res = requests.get(url, headers=gen_header())
+    if not res:
+        return None
+    dytk = re.findall("dytk: '(.*)'", res.content.decode('utf-8'))
+    if len(dytk):
+        return dytk[0]
+    return None
+
+
+def get_hot_video():
+    result = fetch(map_hot_func.get(hot_opt))
+    # process json data
+    video_list = result.get('aweme_list', [])
+    return video_list
+
+def download(medium_type, uri, medium_url, target_folder, newest_folder):
 
     headers = copy.copy(gen_header())
     file_name = uri
@@ -85,6 +119,8 @@ def download(medium_type, uri, medium_url, target_folder):
             with open(file_path, 'wb') as fh:
                 for chunk in resp.iter_content(chunk_size=1024):
                     fh.write(chunk)
+            if allow_newest and newest_folder is not None:
+                shutil.copy(file_path, newest_folder)
             break
         except:
             pass
@@ -97,31 +133,6 @@ def download(medium_type, uri, medium_url, target_folder):
         print("Failed to retrieve %s from %s.\n" % (uri, medium_url))
         time.sleep(1)
 
-
-def get_real_address(url):
-    if url.find('v.douyin.com') < 0:
-        return url
-    res = requests.get(url, headers=gen_header(), allow_redirects=False)
-    return res.headers['Location'] if res.status_code == 302 else None
-
-
-def get_dytk(url):
-    res = requests.get(url, headers=gen_header())
-    if not res:
-        return None
-    dytk = re.findall("dytk: '(.*)'", res.content.decode('utf-8'))
-    if len(dytk):
-        return dytk[0]
-    return None
-
-
-def get_hot_video():
-    result = fetch(map_hot_func.get(hot_opt))
-    # process json data
-    video_list = result.get('aweme_list', [])
-    return video_list
-
-
 class DownloadWorker(Thread):
     def __init__(self, queue):
         Thread.__init__(self)
@@ -129,8 +140,8 @@ class DownloadWorker(Thread):
 
     def run(self):
         while True:
-            medium_type, uri, download_url, target_folder = self.queue.get()
-            download(medium_type, uri, download_url, target_folder)
+            medium_type, uri, download_url, target_folder, newest_folder = self.queue.get()
+            download(medium_type, uri, download_url, target_folder, newest_folder)
             self.queue.task_done()
 
 
@@ -142,13 +153,13 @@ class CrawlerScheduler(object):
         self.musics = []
         self.videos = []
         self.hots = []
-        self.url_key = ''
+        self.url_key = {}
         for i in range(len(items)):
             if isinstance(items[i], dict):
                 self.hots = items
                 break
             url = get_real_address(items[i])
-            self.url_key = items[i].rstrip().lstrip().split('/')[-2]
+            self.url_key[url] = items[i].rstrip().lstrip().split('/')[-2]
             if not url:
                 continue
             if re.search('share/user', url):
@@ -180,7 +191,7 @@ class CrawlerScheduler(object):
             worker = DownloadWorker(self.queue)
             worker.daemon = True
             worker.start()
-
+        hot_count = 0
         for url in self.numbers:
             self.download_user_videos(url)
         for url in self.challenges:
@@ -190,21 +201,27 @@ class CrawlerScheduler(object):
         for url in self.videos:
             self.download_video(url)
         for aweme in self.hots:
+            if hot_count >= max_record:
+                break
+            hot_count += 1
             self.download_hot_video(aweme)
             self.queue.join()
             print("\nFinish Downloading All the hot video")
 
     def download_hot_video(self, aweme):
         current_folder = os.getcwd()
-        target_folder = os.path.join(current_folder, 'download/%s' % map_opts.get(hot_opt))
+        now = datetime.now().strftime('%Y%m%d')
+        target_folder = os.path.join(current_folder, 'download/{}_{}'.format(map_opts.get(hot_opt), now))
         if not os.path.isdir(target_folder):
             os.mkdir(target_folder)
-
+        newest_folder = os.path.join(current_folder, 'download/newest_video_%s' % now)
+        if not os.path.isdir(newest_folder):
+            os.mkdir(newest_folder)
         # for aweme in aweme_list:
         # video_count += 1
         hostname = urllib.parse.urlparse(aweme['aweme_info']['share_url']).hostname
         aweme['aweme_info']['hostname'] = hostname
-        self._join_download_queue(aweme['aweme_info'], target_folder)
+        self._join_download_queue(aweme['aweme_info'], target_folder, newest_folder)
 
 
     def download_video(self, url):
@@ -256,7 +273,7 @@ class CrawlerScheduler(object):
               (musics_id, video_count))
         print("\nFinish Downloading All the videos from @%s\n\n" % musics_id)
 
-    def _join_download_queue(self, aweme, target_folder):
+    def _join_download_queue(self, aweme, target_folder, newest_folder=None):
         try:
             if aweme.get('video', None):
                 uri = aweme['video']['play_addr']['uri']
@@ -293,12 +310,12 @@ class CrawlerScheduler(object):
                 share_info = aweme.get('share_info', {})
                 url = download_url.format(
                     '&'.join([key + '=' + download_params[key] for key in download_params]))
-                self.queue.put(('video', uri, url, target_folder))
+                self.queue.put(('video', uri, url, target_folder, newest_folder))
             else:
                 if aweme.get('image_infos', None):
                     image = aweme['image_infos']['label_large']
                     self.queue.put(
-                        ('image', image['uri'], image['url_list'][0], target_folder))
+                        ('image', image['uri'], image['url_list'][0], target_folder, newest_folder))
 
         except KeyError:
             return
@@ -355,22 +372,34 @@ class CrawlerScheduler(object):
         #     'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_10_1) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/39.0.2171.95 Safari/537.36'
         # }
 
-        res = requests.get('https://aweme.snssdk.com/aweme/v1/aweme/detail/?aweme_id=6737210825959869708')
+        res = requests.get('https://aweme.snssdk.com/aweme/v1/aweme/detail/?aweme_id=6737210825959869708', headers=gen_header())
         contentJson = json.loads(res.content.decode('utf-8'))
         a= 1
 
     def _download_user_media(self, user_id, dytk, url):
-        current_folder = os.getcwd()
-        target_folder = os.path.join(current_folder, 'download/{}_{}'.format(user_id, self.url_key))
-        if not os.path.isdir(target_folder):
-            os.mkdir(target_folder)
-
         if not user_id:
             print("Number %s does not exist" % user_id)
             return
+        current_folder = os.getcwd()
+        target_folder = os.path.join(current_folder, 'download/{}_{}'.format(user_id, self.url_key[url]))
+        if not os.path.isdir(target_folder):
+            os.mkdir(target_folder)
+        if download_favorite:
+            target_folder += '/favorite'
+        if not os.path.isdir(target_folder):
+            os.mkdir(target_folder)
+        now = datetime.now().strftime('%Y%m%d')
+        newest_folder = os.path.join(current_folder, 'download/newest_video_%s' % now)
+        if not os.path.isdir(newest_folder):
+            os.mkdir(newest_folder)
         hostname = urllib.parse.urlparse(url).hostname
         signature = self.generateSignature(str(user_id))
-        user_video_url = "https://%s/aweme/v1/aweme/post/" % hostname
+        if download_favorite:
+            user_video_url = "https://www.douyin.com/aweme/v1/aweme/favorite/"
+            headers = gen_header(HEADERS_FAVORITE)
+        else:
+            user_video_url = "https://%s/aweme/v1/aweme/post/" % hostname
+            headers = gen_header()
         user_video_params = {
             'user_id': str(user_id),
             'count': '21',
@@ -387,14 +416,16 @@ class CrawlerScheduler(object):
         while True:
             if max_cursor:
                 user_video_params['max_cursor'] = str(max_cursor)
-            res = requests.get(user_video_url, headers=gen_header(),
+            res = requests.get(user_video_url, headers=headers,
                                params=user_video_params)
             contentJson = json.loads(res.content.decode('utf-8'))
             aweme_list = contentJson.get('aweme_list', [])
             for aweme in aweme_list:
+                if video_count >= max_record:
+                    break
                 video_count += 1
                 aweme['hostname'] = hostname
-                self._join_download_queue(aweme, target_folder)
+                self._join_download_queue(aweme, target_folder, newest_folder)
             if contentJson.get('has_more'):
                 max_cursor = contentJson.get('max_cursor')
             else:
@@ -546,6 +577,8 @@ def parse_sites(fileName):
 
 download_favorite = False
 hot_opt = None
+allow_newest = False
+max_record = 1000000
 map_opts = {
     '-h': 'hot',
     '-e': 'energy',
@@ -561,7 +594,7 @@ if __name__ == "__main__":
     content, opts, args = None, None, []
     try:
         if len(sys.argv) >= 2:
-            opts, args = getopt.getopt(sys.argv[1:], "he")
+            opts, args = getopt.getopt(sys.argv[1:], "hefc", ["max="])
     except getopt.GetoptError as err:
         usage()
         sys.exit(2)
@@ -571,18 +604,25 @@ if __name__ == "__main__":
             if o in ("-h", "-e"):
                 hot_opt = o
                 content = get_hot_video()
-                break
-    elif not args:
-        # check the sites file
-        filename = "share-url.txt"
-        if os.path.exists(filename):
-            content = parse_sites(filename)
+            if o in ("-f"):
+                download_favorite = True
+            if o in ("--max"):
+                max_record = int(val)
+            if o in ("-c"):
+                allow_newest = True
+    if not hot_opt:
+        if not args:
+            # check the sites file
+            filename = "share-url.txt"
+            if os.path.exists(filename):
+                content = parse_sites(filename)
+            else:
+                usage()
+                sys.exit(1)
         else:
-            usage()
-            sys.exit(1)
-    else:
-        content = (args[0] if args else '').split(",")
-
+            print(args)
+            content = (args[0] if args else '').split(",")
+    print(opts)
     if len(content) == 0 or content[0] == "":
         usage()
         sys.exit(1)
