@@ -88,6 +88,10 @@ def get_hot_video():
     video_list = result.get('aweme_list', [])
     return video_list
 
+def is_reach_max_record(current_record):
+    return True if max_record is not None and current_record >= max_record else False
+
+
 def download(medium_type, uri, medium_url, target_folder, newest_folder):
 
     headers = copy.copy(gen_header())
@@ -201,7 +205,7 @@ class CrawlerScheduler(object):
         for url in self.videos:
             self.download_video(url)
         for aweme in self.hots:
-            if hot_count >= max_record:
+            if is_reach_max_record(hot_count):
                 break
             hot_count += 1
             self.download_hot_video(aweme)
@@ -377,6 +381,7 @@ class CrawlerScheduler(object):
         a= 1
 
     def _download_user_media(self, user_id, dytk, url):
+        print('Start download user media: %s' % user_id)
         if not user_id:
             print("Number %s does not exist" % user_id)
             return
@@ -413,7 +418,12 @@ class CrawlerScheduler(object):
             user_video_params['aid'] = '1180'
 
         max_cursor, video_count = None, 0
+        reach_max_record = False
+        res_count = 0
         while True:
+            res_count += 1
+            # headers = gen_header(HEADERS_FAVORITE) if download_favorite else gen_header()
+            print("res_count: {} ----- {}\n".format(res_count, url))
             if max_cursor:
                 user_video_params['max_cursor'] = str(max_cursor)
             res = requests.get(user_video_url, headers=headers,
@@ -421,11 +431,14 @@ class CrawlerScheduler(object):
             contentJson = json.loads(res.content.decode('utf-8'))
             aweme_list = contentJson.get('aweme_list', [])
             for aweme in aweme_list:
-                if video_count >= max_record:
+                if is_reach_max_record(video_count):
+                    reach_max_record = True
                     break
                 video_count += 1
                 aweme['hostname'] = hostname
                 self._join_download_queue(aweme, target_folder, newest_folder)
+            if reach_max_record:
+                break
             if contentJson.get('has_more'):
                 max_cursor = contentJson.get('max_cursor')
             else:
@@ -578,7 +591,7 @@ def parse_sites(fileName):
 download_favorite = False
 hot_opt = None
 allow_newest = False
-max_record = 1000000
+max_record = None
 map_opts = {
     '-h': 'hot',
     '-e': 'energy',
